@@ -224,30 +224,46 @@ def validate_wireguard(wg, require_ipv4=False):
     if not type(wg) is dict:
         return f"wireguard: '{wg}' must be type dictionary"
 
-    if "remote_address" in wg.keys():
-        if "remote_port" not in wg.keys():
+    if "remote_address" in wg:
+        if "remote_port" not in wg:
             errors.append("wireguard.remote_port: must exist when remote_address defined")
 
         require_ipv4_error = "wireguard.remote_address must be an IPv4 address or have a valid DNS A record for an IPv4 only router"
-        try:
-            # test if value is already an IP address
-            remote_address = ipaddress.ip_address(wg["remote_address"])
 
-            #  if require_ipv4 address must be IPv4 address
-            if require_ipv4 and not isinstance(remote_address, ipaddress.IPv4Address):
+        try:
+            # This should be correct# Try parsing directly whether remote_address is an IP address
+            remote_ip = ipaddress.ip_address(wg["remote_address"])
+
+            # Validate if require_ipv4 and not IPv4
+            if require_ipv4 and not isinstance(remote_ip, ipaddress.IPv4Address):
                 errors.append(require_ipv4_error)
+
+            # Validate whether IP is in private/unroutable space
+            if remote_ip.is_private or remote_ip.is_loopback or remote_ip.is_link_local or \
+               remote_ip.is_multicast or remote_ip.is_reserved or remote_ip.is_unspecified:
+                errors.append("wireguard.remote_address must not be a private or unroutable IP address (RFC1918, etc)")
+
         except ValueError:
+            # Not direct IP, do DNS resolve
             try:
-                # skip resolving AAAA record if we require an IPv4
+                # If it requires IPv4, just skip AAAA
                 if require_ipv4:
                     raise dns.exception.DNSException
 
-                # if not an IP address; attempt to resolve AAAA record
+                # Resolve AAAA record first
                 dns.resolver.resolve(wg["remote_address"], "AAAA")
+
             except dns.exception.DNSException:
                 try:
-                    # if no AAAA record; attempt to resolve A record
-                    dns.resolver.resolve(wg["remote_address"], "A")
+                    # Resolve A record (IPv4)
+                    a_records = dns.resolver.resolve(wg["remote_address"], "A")
+
+                    # Validate resolution results: may not resolve to private/unroutable IP
+                    for r in a_records:
+                        resolved_ip = ipaddress.ip_address(r.to_text())
+                        if resolved_ip.is_private or resolved_ip.is_loopback or resolved_ip.is_link_local or \
+                           resolved_ip.is_multicast or resolved_ip.is_reserved or resolved_ip.is_unspecified:
+                            errors.append("wireguard.remote_address resolves to a private or unroutable IP address (RFC1918, etc)")
                 except dns.exception.DNSException:
                     errors.append(
                         require_ipv4_error if require_ipv4
